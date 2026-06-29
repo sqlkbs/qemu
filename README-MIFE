@@ -1,3 +1,4 @@
+
 # MIFE-Host-ISA-Proxy Readme
 
 This documentation outlines the complete engineering pipeline required to bridge a legacy **CIO-DAS08 ISA Data Acquisition Card** into a virtualized Windows 98 SE / MS-DOS environment running on a modern Linux host machine with MBATX-CS620-H310C motherboard from DFI. It details the underlying hardware mapping architecture, the build process for a custom QEMU binary, deployment strategies, and validation protocols.
