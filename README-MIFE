@@ -129,6 +129,8 @@ cd build
 make -j$(nproc)
 ```
 
+The compiled binary file qemu-system-x86_64 will be generated under /build/x86_64-softmmu/
+
 ### Step 4.2: Move and Register the Binary on the Target Host
 
 1. Transfer the compiled `qemu-system-x86_64` binary to the host machine via secure network copy or standard USB media storage.
