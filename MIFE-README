@@ -1,0 +1,231 @@
+# MIFE-Host-ISA-Proxy Readme
+
+This documentation outlines the complete engineering pipeline required to bridge a legacy **CIO-DAS08 ISA Data Acquisition Card** into a virtualized Windows 98 SE / MS-DOS environment running on a modern Linux host machine with MBATX-CS620-H310C motherboard from DFI. It details the underlying hardware mapping architecture, the build process for a custom QEMU binary, deployment strategies, and validation protocols.
+
+This setup is specifically for MBATX-CS620-H310C motherboard running Ubuntu v18.04.5 with QEMU v2.11.1.
+
+---
+
+## 1. Hardware Architecture & Electrical Blueprint Map
+
+Modern motherboards lack physical ISA slots. To bridge this gap, the target host machine utilizes a **PCIe-to-ISA hardware bridge adapter** (e.g., using an ITE or Winbond bridge controller).
+
+The bridge maps the legacy 10-bit ISA I/O space into the host's modern PCIe I/O Base Address Register (BAR) window.
+
+```
++-----------------------------------------------------------------------+
+|                       WINDOWS 98 GUEST VM                             |
+|  Accesses legacy ISA Ports: 0x390 - 0x39F                             |
++------------------------------------+----------------------------------+
+                                     | (Intercepted by QEMU Memory Region)
+                                     v
++-----------------------------------------------------------------------+
+|                       MIFE CUSTOM QEMU ISA PROXY                      |
+|  - Tracks memory region offset: addr (0 to 15)                        |
+|  - Dynamically calculates host port: 0x5390 + addr                    |
+|  - Executes raw hardware assembly: inb / outb                         |
++------------------------------------+----------------------------------+
+                                     | (Kernel space execution via iopl)
+                                     v
++-----------------------------------------------------------------------+
+|                       UBUNTU LINUX HOST KERNEL                        |
+|  Directly routes outb/inb commands down the PCIe Bus BAR Window       |
++------------------------------------+----------------------------------+
+                                     |
+                                     v
++-----------------------------------------------------------------------+
+|                    PHYSICAL PCIe-TO-ISA BRIDGE                        |
+|  Translates Host Port 0x5390 directly into physical ISA Bus 0x390     |
++------------------------------------+----------------------------------+
+                                     |
+                                     v
++-----------------------------------------------------------------------+
+|                    CIO-DAS08 PHYSICAL ISA CARD                        |
+|  Responds across 8-port register layout block                         |
++-----------------------------------------------------------------------+
+
+```
+
+### Physical-to-Virtual Address Mapping Layout
+
+* **Guest Base Address:** `0x390` (Configured via the card's physical DIP switches). This is the default setting on the CIO-DAS08 ISA card used by MIFE v1.
+* **Host Translation Base:** `0x5390` (Assigned by the host PCIe bus architecture). This is hardcoded in the MIFE Custom QEMU ISA Proxy. If this address has been taken by other devices, needs to update and rebuild the proxy.
+* **Address Space Window:** 16 Bytes (`0x390` to `0x39F`).
+
+We patch a raw I/O listener directly into QEMU to intercept the Windows 98 guest's legacy 0x390 port calls at the hypervisor level, execute them on the real physical host CPU at 0x5390, and pass the real data back.
+
+---
+
+## 2. Environment Setup & Dependency Workarounds
+
+Building older or custom versions of QEMU on clean, modern Ubuntu machines requires resolving deprecated dependency packages and handling obsolete git registry submodules. This environment setup is for Ubuntu v18.04.5 (which using QEMU v2.11.1). For other Ubuntu versions, the process might be different.
+
+### Step 2.1: Install Core Build Toolchain & Dependencies
+
+Run the following commands to provision the build environment:
+
+```bash
+sudo apt update
+sudo apt install -y git python build-essential pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev libgtk-3-dev
+```
+
+Clone and checkout QEMU v2.11.1. This is the exact version that Ubuntu 18.04 uses natively.
+
+```Bash
+git clone https://github.com/qemu/qemu.git
+cd qemu
+git checkout qemu-v2.11.1
+```
+
+### Step 2.2: Mitigate "Old Git Registry" / Submodule Errors
+
+Older checkouts of QEMU source code often point to dead or migrated Git URLs for mandatory third-party submodules (like `dtc`, `slirp`, or `keycodemapdb`).
+
+If `git submodule update --init --recursive` fails due to broken URLs, apply this structural workaround:
+
+1. Open the project's root `.gitmodules` configuration file and replace any instances of `git://git.qemu.org/` with the modern HTTPS mirror: `https://gitlab.com/qemu-project/`. Or run following command in the git project folder (qemu) to do the replacement.
+
+```Bash
+sed -i 's|git://git.qemu.org/|https://gitlab.com/qemu-project/|g' .gitmodules
+sed -i 's|git://github.com/|https://github.com/|g' .gitmodules
+sed -i 's|git://git.qemu-project.org/|https://gitlab.com/qemu-project/|g' .gitmodules
+sed -i 's|https://git.qemu.org/git/|https://gitlab.com/qemu-project/|g' .gitmodules
+
+sed -i 's/\bmemfd_create\b/local_memfd_create/g' util/memfd.c
+```
+
+2. Force a sync and update:
+
+```bash
+// Clear out any half-downloaded junk
+git submodule deinit -f .
+
+git submodule sync
+git submodule update --init --recursive
+
+```
+
+---
+
+## 3. Custom QEMU Code Implementation
+
+The custom device model intercepts I/O commands destined for guest ports `0x390–0x39F`, dynamically calculates the matching `0x5390` host offset, and safely drops into ring-0 hardware privilege using `iopl(3)` to execute the instructions via inline x86 assembly.
+
+Create custom device file hw/misc/mife-host-isa-proxy.c with current contents
+
+---
+
+## 4. Compilation & Deployment
+
+### Step 4.1: Compile the Custom System Binary
+
+Configure and build only the required `x86_64` virtualization targets to speed up compilation time:
+
+```bash
+mkdir build
+cd build
+../configure --target-list=x86_64-softmmu --enable-kvm --enable-gtk
+make -j$(nproc)
+```
+
+### Step 4.2: Move and Register the Binary on the Target Host
+
+1. Transfer the compiled `qemu-system-x86_64` binary to the host machine via secure network copy or standard USB media storage.
+2. Store the binary in a distinct local directory to prevent accidental package manager overwrites:
+
+```bash
+sudo cp qemu-system-x86_64 /usr/local/bin/mife-qemu-system-x86_64
+sudo chmod +x /usr/local/bin/mife-qemu-system-x86_64
+```
+
+3. Grant raw I/O privileges to the binary. Because standard users cannot execute raw hardware assembly inb/outb loops, grant the new binary raw I/O capabilities using Linux file traits:
+
+```Bash
+sudo setcap cap_sys_rawio+ep /usr/local/bin/mife-qemu-system-x86_64
+```
+
+### Step 4.3: Updating Your Domain XML Configuration within Libvirt (Virtual Machine Manager)
+
+In QEMU, property assignments are added directly to the device call string separated by commas. Boolean options can be set using on/off or true/false. QEMU accepts both base-10 integers and traditional hexadecimal prefix formats (0x) for the ports.
+
+Open your virtual machine XML configuration profile and edit the bottom block, add following lines just before the </domain>. You can adjust the debug/host-port/guest-port as appropriate:
+
+```Bash
+  <qemu:commandline>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='mife-host-isa-proxy,debug=off,host-port=0x5390,guest-port=0x390'/>
+    
+    <qemu:arg value='-rtc'/>
+    <qemu:arg value='base=localtime,clock=host,driftfix=slew'/>
+  </qemu:commandline>
+</domain>
+```
+
+The second part of the above lines (the '-rtc' parts) is the most stable, battle-tested configuration for running Windows 98 with hardware virtualization (KVM) on a Linux host uses the host's local wall-clock time, paired with a mechanism to gently handle missed ticks.
+driftfix=slew: This is the magic flag. If the VM temporarily falls behind because of a heavy burst of data from your ISA card, QEMU will smoothly inject the missing clock ticks at a slightly accelerated rate to catch up, rather than dumping them all into Windows 98 at once and locking up the OS.
+
+---
+
+## 5. Verification & Testing Protocol
+
+To ensure full bi-directional pass-through behavior without loading external driver payloads, use the vintage native MS-DOS `debug` environment.
+
+### Step 5.1: Host Side Live Log Monitoring
+
+Before issuing commands inside the guest machine, establish a live trace interface on the Ubuntu Host to bypass systemd tracking blocks:
+
+```bash
+sudo tail -f /var/log/libvirt/qemu/*.log
+
+```
+
+### Step 5.2: Executing MS-DOS Debug Sweeps
+
+Boot the Windows 98 guest environment into an MS-DOS prompt window. Initialize the low-level utility tool:
+
+```text
+C:\> debug
+
+```
+
+> **CRITICAL SYNTAX NOTE:** Vintage versions of `debug.exe` parse spaces strictly. Separate the target I/O port address and data byte payload using a comma (`o port,data`).
+
+Execute an sequential sweeping check of the card's assigned registers:
+
+```text
+-i 390
+-i 391
+-i 392
+-i 394
+-i 396
+-i 397
+
+```
+
+### Step 5.3: Interpreting the Diagnostics Data Profile
+
+If the architecture pipeline is fully intact, the hardware registers will match the factory profile shown below:
+
+```text
+-i 390   --> Returns 00  (ADC Low Byte: Expected idle condition state)
+-i 391   --> Returns 00  (ADC High Byte: Expected idle condition state)
+-i 392   --> Returns 77  (Status Flag: Binary 01110111, indicating steady digital inputs)
+-i 394   --> Returns FD  (Intel 8254 Counter 0: Live fluctuating value proving clock ticks)
+-i 396   --> Returns 00  (Intel 8254 Counter 2: Stable, unassigned background counter clock)
+-i 397   --> Returns FF  (8254 Control Register: Write-only register; reading forces open-bus floating)
+
+```
+
+### Step 5.4: Verifying Complete Hardware Write Execution
+
+To verify full outbound control pathing to the physical card, attempt to cycle the internal Multiplexer (MUX) configuration lines:
+
+```text
+-o 392,00   <-- Sets MUX targeting Analog Channel 0
+-i 392      <-- Read status line results back
+-o 392,07   <-- Sets MUX targeting Analog Channel 7
+-i 392      <-- Confirm changes register on the board hardware
+
+```
+
+Your host log output will capture every single execution step simultaneously, verifying that your software logic and hardware connection are fully operational.
