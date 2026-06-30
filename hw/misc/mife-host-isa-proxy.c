@@ -19,11 +19,13 @@
 typedef struct MifeHostISAProxyState {
     DeviceState parent_obj;
     MemoryRegion ioports;
-    
+
     /* Configurable fields bound to QEMU properties */
     bool debug;
     uint16_t host_port;
     uint16_t guest_port;
+    uint16_t log_sample_rate;
+
     uint64_t log_counter;	//sample count for logging to improve performance
 } MifeHostISAProxyState;
 
@@ -32,29 +34,29 @@ static uint64_t mife_host_isa_proxy_read(void *opaque, hwaddr addr, unsigned siz
 {
     // Cast the opaque pointer back to our state structure
     MifeHostISAProxyState *s = (MifeHostISAProxyState *)opaque;
-    
+
     static __thread bool iopl_unlocked = false;
     if (!iopl_unlocked) {
         if (iopl(3) < 0) return 0xFF;
         iopl_unlocked = true;
     }
-    
+
     uint8_t value;
     uint16_t target_host_port = s->host_port + addr;
-    
+
     asm volatile("inb %%dx, %0" : "=a"(value) : "d"(target_host_port));
-    
+
     // Conditional debugging flag
-	if (s->debug) {
-		s->log_counter++;
-		// Only print once every 400 port interactions
-		if (s->log_counter % 400 == 0) {
-			fprintf(stderr, "[SAMPLED LOG] MIFE ISA PROXY: Host Port 0x%x -> Val: 0x%02X\n", 
-					target_host_port, value);
-			fflush(stderr); // Safe to keep here because it only fires occasionally
-		}
+    if (s->debug) {
+	s->log_counter++;
+	// Only print once every 400 port interactions
+	if (s->log_counter % s->log_sample_rate == 0) {
+ 	    fprintf(stderr, "[SAMPLED LOG] MIFE ISA PROXY: Host Port 0x%x -> Val: 0x%02X\n",
+		target_host_port, value);
+	    fflush(stderr); // Safe to keep here because it only fires occasionally
 	}
-	
+    }
+
     return value;
 }
 
@@ -62,23 +64,23 @@ static uint64_t mife_host_isa_proxy_read(void *opaque, hwaddr addr, unsigned siz
 static void mife_host_isa_proxy_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     MifeHostISAProxyState *s = (MifeHostISAProxyState *)opaque;
-    
+
     static __thread bool iopl_unlocked = false;
     if (!iopl_unlocked) {
         if (iopl(3) < 0) return;
         iopl_unlocked = true;
     }
-    
+
     uint8_t value = (uint8_t)val;
     uint16_t target_host_port = s->host_port + addr;
-    
+
     asm volatile("outb %0, %%dx" : : "a"(value), "d"(target_host_port));
-    
+
 	if (s->debug) {
 		s->log_counter++;
 		// Only print once every 400 port interactions
-		if (s->log_counter % 400 == 0) {
-			fprintf(stderr, "[SAMPLED LOG] MIFE ISA PROXY: Host Port 0x%x -> Val: 0x%02X\n", 
+		if (s->log_counter % s->log_sample_rate == 0) {
+			fprintf(stderr, "[SAMPLED LOG] MIFE ISA PROXY: Host Port 0x%x -> Val: 0x%02X\n",
 					target_host_port, value);
 			fflush(stderr); // Safe to keep here because it only fires occasionally
 		}
@@ -103,16 +105,17 @@ static void mife_host_isa_proxy_realize(DeviceState *dev, Error **errp)
 
     // Pass 's' as the opaque object parameter so callbacks can read properties
     memory_region_init_io(&s->ioports, OBJECT(s), &mife_host_isa_proxy_ops, s, "mife-physical-isa-card", 16);
-    
+
     // Bind dynamically to the configured guest_port instead of a hardcoded 0x390
     memory_region_add_subregion(get_system_io(), s->guest_port, &s->ioports);
 }
 
 /* Declare the property structures mapping string keys to variables with defaults */
 static Property mife_host_isa_proxy_properties[] = {
-    DEFINE_PROP_BOOL("debug", MifeHostISAProxyState, debug, false),
     DEFINE_PROP_UINT16("host-port", MifeHostISAProxyState, host_port, 0x5390),
     DEFINE_PROP_UINT16("guest-port", MifeHostISAProxyState, guest_port, 0x390),
+    DEFINE_PROP_UINT16("log_sample_rate", MifeHostISAProxyState, log_sample_rate, 400),
+    DEFINE_PROP_BOOL("debug", MifeHostISAProxyState, debug, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -121,7 +124,7 @@ static void mife_host_isa_proxy_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = mife_host_isa_proxy_realize;
-    dc->user_creatable = true; 
+    dc->user_creatable = true;
     dc->props = mife_host_isa_proxy_properties; // Inject the properties array into the device class
 }
 

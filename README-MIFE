@@ -120,6 +120,18 @@ Create custom device file hw/misc/mife-host-isa-proxy.c with current contents
 
 ### Step 4.1: Compile the Custom System Binary
 
+Open the Build Configuration Manifest:
+
+```bash
+sudo nano /hw/misc/Makefile.objs
+```
+
+Scroll all the way to the very bottom of the file, create a new line, and add your proxy object file to the compilation queue exactly like this:
+
+```bash
+common-obj-y += mife-host-isa-proxy.o
+```
+
 Configure and build only the required `x86_64` virtualization targets to speed up compilation time:
 
 ```bash
@@ -151,12 +163,40 @@ sudo setcap cap_sys_rawio+ep /usr/local/bin/mife-qemu-system-x86_64
 
 In QEMU, property assignments are added directly to the device call string separated by commas. Boolean options can be set using on/off or true/false. QEMU accepts both base-10 integers and traditional hexadecimal prefix formats (0x) for the ports.
 
-Open your virtual machine XML configuration profile and edit the bottom block, add following lines just before the </domain>. You can adjust the debug/host-port/guest-port as appropriate:
+Open your virtual machine XML configuration profile, scroll all the way to the top of your XML editor in Virtual Machine Manager. Look at the very first <domain> tag.
+
+It usually looks like this:
+
+```XML
+<domain type='kvm'>
+```
+
+You must inject the QEMU XML namespace attribute into this tag so Libvirt knows how to read custom command-line blocks. Change it to exactly this:
+
+```XML
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+```
+
+At the <devices> section, and look for the <emulator> tag near the top of that section. By default, it will look like this:
+
+```XML
+<devices>
+  <emulator>/usr/bin/qemu-system-x86_64</emulator>
+```
+
+Replace that path with the absolute path to your custom-compiled binary:
+
+```XML
+<devices>
+  <emulator>/usr/local/bin/mife-qemu-system-x86_64</emulator>
+```
+
+Scroll all the way to the very bottom of the XML file. Insert your custom command-line arguments right above the closing </domain> tag. You can adjust the debug/host-port/guest-port as appropriate:
 
 ```Bash
   <qemu:commandline>
     <qemu:arg value='-device'/>
-    <qemu:arg value='mife-host-isa-proxy,debug=off,host-port=0x5390,guest-port=0x390'/>
+    <qemu:arg value='mife-host-isa-proxy,host-port=0x5390,guest-port=0x390,debug=off,log_sample_rate=400'/>
     
     <qemu:arg value='-rtc'/>
     <qemu:arg value='base=localtime,clock=host,driftfix=slew'/>
