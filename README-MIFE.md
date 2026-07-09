@@ -14,37 +14,48 @@ Modern motherboards lack physical ISA slots. To bridge this gap, the target host
 The bridge maps the legacy 10-bit ISA I/O space into the host's modern PCIe I/O Base Address Register (BAR) window.
 
 ```
-+-----------------------------------------------------------------------+
-|                       WINDOWS 98 GUEST VM                             |
-|  Accesses legacy ISA Ports: 0x390 - 0x39F                             |
-+------------------------------------+----------------------------------+
-                                     | (Intercepted by QEMU Memory Region)
-                                     v
-+-----------------------------------------------------------------------+
-|                       MIFE CUSTOM QEMU ISA PROXY                      |
-|  - Tracks memory region offset: addr (0 to 15)                        |
-|  - Dynamically calculates host port: 0x5390 + addr                    |
-|  - Executes raw hardware assembly: inb / outb                         |
-+------------------------------------+----------------------------------+
-                                     | (Kernel space execution via iopl)
-                                     v
-+-----------------------------------------------------------------------+
-|                       UBUNTU LINUX HOST KERNEL                        |
-|  Directly routes outb/inb commands down the PCIe Bus BAR Window       |
-+------------------------------------+----------------------------------+
-                                     |
-                                     v
-+-----------------------------------------------------------------------+
-|                    PHYSICAL PCIe-TO-ISA BRIDGE                        |
-|  Translates Host Port 0x5390 directly into physical ISA Bus 0x390     |
-+------------------------------------+----------------------------------+
-                                     |
-                                     v
-+-----------------------------------------------------------------------+
-|                    CIO-DAS08 PHYSICAL ISA CARD                        |
-|  Responds across 8-port register layout block                         |
-+-----------------------------------------------------------------------+
-
+DOWNBOUND PATH (Read / Write)                     UPBOUND PATH (Interrupt / IRQ)
+ ===========================================     ===========================================
++-------------------------------------------+   +-------------------------------------------+
+|            WINDOWS 98 GUEST VM            |   |            WINDOWS 98 GUEST VM            |
+| - Accesses ISA Ports: 0x390 - 0x39F       |   | - Virtual PIC intercepts Guest IRQ 5      |
+| - Issues raw legacy 'inb'/'outb' macros   |   | - Interrupt Vector jumps to 'DASint' ISR  |
++---------------------+---------------------+   +---------------------+---------------------+
+                      |                                               ^
+                      | (Intercepted by                               | (qemu_set_irq pulses
+                      |  QEMU Memory Region)                          |  virtual IRQ high/low)
+                      v                                               |
++-------------------------------------------+   +---------------------+---------------------+
+|        MIFE CUSTOM QEMU ISA PROXY         |   |        MIFE CUSTOM QEMU ISA PROXY         |
+| - Tracks memory offset: addr (0 to 15)    |   | - Main Loop: Triggers Bottom Half (BH)    |
+| - Computes host port: 0x5390 + addr       |   | - Worker Thread: Blocks on read() loop    |
+| - Executes host assembly: inb / outb      |   | - Evaluates event state via host property |
++---------------------+---------------------+   +---------------------+---------------------+
+                      |                                               ^
+                      | (Kernel space                                 | (read() unblocks on
+                      |  execution via iopl)                          |  host-irq-device descriptor)
+                      v                                               |
++-------------------------------------------+   +---------------------+---------------------+
+|         UBUNTU LINUX HOST KERNEL          |   |         UBUNTU LINUX HOST KERNEL          |
+| - Directs outb/inb down PCIe BAR window   |   | - Catches hardware IRQ via UIO driver     |
+|                                           |   | - Exposes event signal to /dev/uio0 node  |
++---------------------+---------------------+   +---------------------+---------------------+
+                      |                                               ^
+                      v                                               | (Motherboard physically
+                      |                                               |  routes slot interrupt pin)
++---------------------+---------------------+   +---------------------+---------------------+
+|        PHYSICAL PCIe-TO-ISA BRIDGE        |   |        PHYSICAL PCIe-TO-ISA BRIDGE        |
+| - Maps Host 0x5390 -> ISA 0x390           |   | - Translates physical ISA IRQ slot line   |
+| - Directs cycle onto old motherboard bus  |   |   straight into a Host PCIe MSI-X signal  |
++---------------------+---------------------+   +---------------------+---------------------+
+                      |                                               ^
+                      v                                               | (Onboard 8253 Timer pulses
+                      |                                               |  hardware IRQ line at 800Hz)
++---------------------+---------------------+   +---------------------+---------------------+
+|        CIO-DAS08 PHYSICAL ISA CARD        |   |        CIO-DAS08 PHYSICAL ISA CARD        |
+| - Responds across 16-port register block  |   | - Pin state changes voltage level when    |
+| - Returns raw analog/digital data streams |   |   conversion process completes            |
++-------------------------------------------+   +-------------------------------------------+
 ```
 
 ### Physical-to-Virtual Address Mapping Layout
@@ -67,7 +78,7 @@ Run the following commands to provision the build environment:
 
 ```bash
 sudo apt update
-sudo apt install -y git python build-essential pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev libgtk-3-dev
+sudo apt install -y git python build-essential pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev libgtk-3-dev flex bison
 ```
 
 Clone and checkout QEMU v2.11.1. This is the exact version that Ubuntu 18.04 uses natively.
